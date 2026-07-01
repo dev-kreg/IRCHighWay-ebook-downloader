@@ -15,7 +15,7 @@ may not render the colors/icons). Works on Linux, macOS, and Windows.
 Fastest — run it straight from the repo, no clone needed:
 
 ```bash
-npx github:USER/irc-ebook-downloader
+npx github:dev-kreg/IRCHighWay-ebook-downloader
 ```
 
 From a clone:
