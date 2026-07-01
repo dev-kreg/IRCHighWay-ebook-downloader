@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15   # backstop: never let a hung step burn the job's 6h default
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,10 +35,18 @@ jobs:
       # "Cannot find module ./widgets/..." the instant the UI initializes.
       # Catch that here so a broken build never reaches a release.
       - name: Smoke-test binary boots
+        timeout-minutes: 2
         run: |
           bin=$(ls dist/*linux* | head -1)
           chmod +x "$bin"
-          script -qec "timeout 4 '$bin' || true" /dev/null | tee boot.log
+          # blessed traps signals (the app even ignores Ctrl-C), so plain
+          # `timeout` can't stop it. Run it under a pty in the background, let
+          # it live ~4s (long enough to build blessed's widgets — the require()
+          # pkg might miss), then SIGKILL. boot.log captures a crash if it fails.
+          script -qec "$bin" boot.log >/dev/null 2>&1 &
+          sleep 4
+          pkill -9 -f "$(basename "$bin")" 2>/dev/null || true
+          kill -9 %1 2>/dev/null || true
           if grep -qi "cannot find module" boot.log; then
             echo "::error::binary crashed loading modules — check pkg.assets in package.json"
             exit 1
