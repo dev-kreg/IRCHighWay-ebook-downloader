@@ -43,11 +43,55 @@ No Node? Grab a standalone binary for your OS from the
 Downloads go to `~/Downloads/ebooks` by default. No port-forwarding needed —
 transfers dial out to the bot, so it works behind home routers.
 
+## Features
+
+**Results table.** Each result is broken into aligned columns instead of a raw
+bot line:
+
+```
+   Author            Title                    Extras              Size   Source
+ ★ Matt Dinniman     This Inevitable Ruin     retail             3.1MB      Bsk  [✓6 ✗0]
+   Matt Dinniman     Dungeon Crawler Carl     DCC 02, retail   457.6KB  Oatmeal  [✓4 ✗0]
+```
+
+- **★** flags the best picks — anything marked *retail* or proofed to
+  **v3.0+** (higher-quality scans/sources).
+- **Extras** collects the bracketed/parenthesised tags from the filename —
+  series, edition, proofing version, `retail`, format notes.
+- **Source** is the serving bot, with its running reliability record
+  `[✓ succeeded ✗ failed]` — how often *that* bot's downloads have worked for
+  you, remembered across runs (see [State](#state)).
+- Results are **sorted best-first** by a quality score (proofing version,
+  `retail` tag, plausible file size).
+- Books you've already downloaded show a **green row**, so repeat searches make
+  it obvious what you already have.
+
+**Filtering.** Press **`/`** to narrow the visible results by typed text
+(matches any column — author, title, extras, or source); **Esc** clears it.
+This is instant and client-side — no new IRC search. To permanently hide bots
+that reliably fail, set [`BLOCK_PROVIDERS`](#config-env-vars) (default:
+`Dumbledore`).
+
+**Search feedback.** While a search is in flight a large centered spinner shows
+SearchBot's own live progress (*accepted → searching → returned N matches*).
+A new search clears the old results immediately, and an empty result set shows
+a clear "no results" message.
+
+**Download tracking.** Select a row and press **Enter** to download:
+
+- The row turns **amber** while queued/transferring, **green** on success,
+  **red** on failure — readable at a glance across a whole batch.
+- An **Active Downloads** panel below the results lists everything in flight
+  (queued / receiving % / done / failed), so a batch doesn't require scrolling.
+- You can queue **several downloads at once**; each finished transfer is matched
+  back to the correct row by filename, even when bots reply out of order.
+
 ## Keys
 
 - Type in the top box, **Enter** to `@search`.
 - **↑/↓** move the results list, **Enter** downloads the highlighted book.
-- **Tab** toggles focus between search box and list.
+- **`/`** filter the current results by text, **Esc** clears the filter.
+- **Tab** toggles focus between search box and list (or click the search box).
 - **q** / **Ctrl-C** quits.
 
 ## Flow
@@ -72,6 +116,18 @@ transfers dial out to the bot, so it works behind home routers.
 | `DOWNLOAD_DIR` | `~/Downloads/ebooks` |
 | `FORMATS` | `epub` (comma-separated, e.g. `epub,mobi`) |
 | `BLOCK_PROVIDERS` | `Dumbledore` (hide these serving bots; set empty to disable) |
+| `DEBUG` | `0` (set `1` to mirror the status log to a file) |
+| `DEBUG_LOG` | `./debug.log` (used when `DEBUG=1`) |
+
+## State
+
+Two small JSON files under `~/.config/irc-ebook-dl/` persist across runs:
+
+- `providers.json` — each bot's success/fail tally (the `[✓ ✗]` badge).
+- `downloaded.json` — which books you've fetched (per bot), for the green rows.
+
+Delete them to reset. Override their locations with `PROVIDER_STATS` /
+`DOWNLOADED_FILE` if you want them elsewhere.
 
 ## Known limits
 
@@ -82,7 +138,11 @@ transfers dial out to the bot, so it works behind home routers.
 
 ## Self-checks
 
+Each module runs its own assertions when executed directly — no test framework:
+
 ```bash
-node dcc.js      # DCC offer parsing
-node parse.js    # results parsing
+node dcc.js          # DCC offer parsing
+node parse.js        # results parsing, ranking, out-of-order matching
+node providers.js    # provider success/fail stats
+node downloaded.js   # downloaded-book tracking
 ```
