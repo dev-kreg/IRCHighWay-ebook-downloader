@@ -1,0 +1,50 @@
+name: Release binaries
+
+# Push a version tag to build standalone binaries and attach them to a
+# GitHub Release:  git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}   # also runnable by hand from the Actions tab
+
+permissions:
+  contents: write         # create the release + upload the binaries
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+
+      # @yao-pkg/pkg is the maintained fork of the archived vercel/pkg. Deps
+      # here are pure JS, so one Linux runner cross-builds every target — pkg
+      # downloads a prebuilt Node base per platform, no OS matrix needed.
+      - name: Build binaries
+        run: >
+          npx @yao-pkg/pkg . --out-path dist
+          --targets node20-linux-x64,node20-macos-x64,node20-macos-arm64,node20-win-x64
+
+      # Smoke-test the Linux binary under a fake TTY: blessed loads its widgets
+      # via a computed require(), which pkg's static analysis misses — if the
+      # `pkg.assets` config didn't force-include them, the binary crashes with
+      # "Cannot find module ./widgets/..." the instant the UI initializes.
+      # Catch that here so a broken build never reaches a release.
+      - name: Smoke-test binary boots
+        run: |
+          bin=$(ls dist/*linux* | head -1)
+          chmod +x "$bin"
+          script -qec "timeout 4 '$bin' || true" /dev/null | tee boot.log
+          if grep -qi "cannot find module" boot.log; then
+            echo "::error::binary crashed loading modules — check pkg.assets in package.json"
+            exit 1
+          fi
+          echo "binary booted without a module-resolution crash"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
