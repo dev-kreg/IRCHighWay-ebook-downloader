@@ -1,5 +1,8 @@
 # IRC Ebook Downloader
 
+<img width="1430" height="844" alt="image" src="https://github.com/user-attachments/assets/a3fe6187-cca2-4930-87e2-bdd251bd7e90" />
+
+
 TUI for downloading ebooks from `#ebooks` on irchighway. Automates the
 search → receive results zip → pick → download flow so you never touch a raw
 IRC client.
