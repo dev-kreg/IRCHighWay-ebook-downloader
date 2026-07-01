@@ -29,6 +29,14 @@ npm install -g .   # or install it as a command: then just `ebook-dl`
 No Node? Grab a standalone binary for your OS from the
 [Releases](../../releases) page (Linux / macOS / Windows).
 
+> **macOS:** the binaries are unsigned, so Gatekeeper blocks them on first run.
+> Clear the quarantine flag once, then run:
+>
+> ```bash
+> xattr -d com.apple.quarantine ./irc-ebook-downloader-macos-*
+> ./irc-ebook-downloader-macos-arm64   # or -x64 on Intel
+> ```
+
 Downloads go to `~/Downloads/ebooks` by default. No port-forwarding needed —
 transfers dial out to the bot, so it works behind home routers.
 
