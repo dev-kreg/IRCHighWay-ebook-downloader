@@ -45,10 +45,48 @@ function versionOf(label) {
   return m ? parseFloat(m[1]) : 0;
 }
 
+// "retail" tag in the name: sourced from a retailer, not OCR'd/proofed.
+function isRetail(label) {
+  return /\bretail\b/i.test(label);
+}
+
 // Provider = the serving bot, the first token: "!Oatmeal Author - ..." -> "Oatmeal".
 function providerOf(cmd) {
   const m = cmd.match(/^!(\S+)/);
   return m ? m[1] : '';
+}
+
+// Split a result's command into displayable Author / Title / Extras. cmd looks
+// like "!Provider Author - [Series] - Title (tags).ext"; extras are the
+// bracket/paren groups (series, proofing version, retail, format tags).
+// ponytail: heuristic split on " - ", not a real bibliographic parser; good
+// enough for column display, revisit if titles with embedded " - " get common.
+function splitFields(cmd, provider) {
+  let rest = cmd.replace(new RegExp('^!' + provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*'), '');
+  rest = rest.replace(/\.\w+$/, ''); // drop extension
+  const extras = [];
+  rest = rest.replace(/[[(]([^\])]+)[\])]/g, (_, inner) => { extras.push(inner.trim()); return ' '; });
+  const parts = rest.split(/\s-\s/).map((s) => s.trim()).filter(Boolean);
+  const author = parts.length > 1 ? parts[0] : '';
+  const title = (parts.length > 1 ? parts.slice(1) : parts).join(' - ') || rest.trim();
+  return { author, title, extras: extras.join(', ') };
+}
+
+// Filename the book bot echoes back on its DCC offer: cmd minus "!Provider ".
+function filenameOf(cmd) {
+  return cmd.slice(cmd.indexOf(' ') + 1);
+}
+
+// Pull the pending download matching an incoming DCC filename out of the queue
+// (mutates it), instead of assuming offers resolve in request order — a
+// faster/queued-ahead provider can finish before an earlier request, which
+// would otherwise credit the wrong row's ✓/✗ and provider stats.
+// ponytail: same-titled duplicates from different providers still resolve
+// FIFO among themselves — DCC offers carry no real per-request correlation ID.
+function takePendingBook(queue, filename) {
+  if (!queue.length) return undefined;
+  const idx = queue.findIndex((r) => filenameOf(r.cmd) === filename);
+  return queue.splice(idx >= 0 ? idx : 0, 1)[0];
 }
 
 // File size in bytes from the "::INFO:: 1.2MB" trailer; 0 if absent.
@@ -62,9 +100,11 @@ function sizeOf(label) {
 // Quality score for ranking (higher = better, shown first). Signals, in order of
 // weight: proofing version, "retail" tag, sane file size. This is quality only —
 // provider success/fail is intentionally NOT factored in yet.
+// ponytail: retail (clean at the source, no OCR) is weighted about even with a
+// v3 scan; only a heavily-proofed v4+ scan edges past it. Tune if that's wrong.
 function scoreResult(item) {
-  let s = versionOf(item.label) * 10;
-  if (/\bretail\b/i.test(item.label)) s += 5;
+  let s = versionOf(item.label) * 8;
+  if (isRetail(item.label)) s += 25;
   const size = sizeOf(item.label);
   if (size) {
     if (size < 30 * 1024) s -= 5;              // <30KB: likely sample/broken
@@ -74,8 +114,9 @@ function scoreResult(item) {
 }
 
 module.exports = {
-  parseResultsZip, parseResultsText, isSupportedArchive, filterFormats,
-  versionOf, providerOf, sizeOf, scoreResult,
+  parseResultsZip, isSupportedArchive, filterFormats,
+  versionOf, isRetail, providerOf, sizeOf, scoreResult, splitFields,
+  takePendingBook,
 };
 
 if (require.main === module) {
@@ -97,5 +138,27 @@ if (require.main === module) {
   const hi = { label: 'Book (v3.0) retail ::INFO:: 1.2MB' };
   const lo = { label: 'Book (v1.0) ::INFO:: 10KB' };
   console.assert(scoreResult(hi) > scoreResult(lo), 'ranking', scoreResult(hi), scoreResult(lo));
+  const retailOnly = { label: 'Book retail ::INFO:: 1.2MB' };
+  const v1Only = { label: 'Book (v1.0) ::INFO:: 1.2MB' };
+  const v5Only = { label: 'Book (v5.0) ::INFO:: 1.2MB' };
+  console.assert(scoreResult(retailOnly) > scoreResult(v1Only), 'retail beats low version', scoreResult(retailOnly), scoreResult(v1Only));
+  console.assert(scoreResult(v5Only) > scoreResult(retailOnly), 'high version beats retail', scoreResult(v5Only), scoreResult(retailOnly));
+  const f1 = splitFields("!Bsk Matt Dinniman - [Dungeon Crawler Carl 02] - Carl's Doomsday Scenario (retail)", 'Bsk');
+  console.assert(f1.author === 'Matt Dinniman', 'split author', f1.author);
+  console.assert(f1.title === "Carl's Doomsday Scenario", 'split title', f1.title);
+  console.assert(f1.extras === 'Dungeon Crawler Carl 02, retail', 'split extras', f1.extras);
+  const f2 = splitFields('!Bsk Matt Dinniman - This Inevitable Ruin.epub', 'Bsk');
+  console.assert(f2.author === 'Matt Dinniman' && f2.title === 'This Inevitable Ruin', 'split no extras', f2);
+  // Regression for the mixed-up ✓/✗ bug: three requests queued in order A,B,C,
+  // but B's bot answers first — must return B, not blindly shift A.
+  const qA = { cmd: '!Bsk Matt Dinniman - Operation Bounce House (Retail).epub' };
+  const qB = { cmd: '!Oatmeal Matt Dinniman - Dominion of Blades (retail).epub' };
+  const qC = { cmd: '!peapod Matt Dinniman - The Butcher\'s Masquerade (Retail).epub' };
+  const queue = [qA, qB, qC];
+  console.assert(takePendingBook(queue, 'Matt Dinniman - Dominion of Blades (retail).epub') === qB, 'out-of-order match');
+  console.assert(queue.length === 2 && queue[0] === qA && queue[1] === qC, 'match removed only B', queue);
+  console.assert(takePendingBook(queue, 'unrecognized filename.epub') === qA, 'unmatched falls back to FIFO head');
+  console.assert(queue.length === 1 && queue[0] === qC, 'fallback removed the head', queue);
+  console.assert(takePendingBook([], 'anything.epub') === undefined, 'empty queue');
   console.log('parse.js self-check OK');
 }

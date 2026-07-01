@@ -8,12 +8,29 @@ IRC client.
 
 ## Run
 
+Requires **Node.js ≥ 16** ([nodejs.org](https://nodejs.org)) and a modern
+terminal (Windows Terminal, iTerm2, or most Linux terminals — legacy `cmd.exe`
+may not render the colors/icons). Works on Linux, macOS, and Windows.
+
+Fastest — run it straight from the repo, no clone needed:
+
 ```bash
-npm install
-npm start        # or: node index.js
+npx github:USER/irc-ebook-downloader
 ```
 
-Downloads go to `~/Downloads/ebooks` by default.
+From a clone:
+
+```bash
+npm install
+npm start          # or: node index.js
+npm install -g .   # or install it as a command: then just `ebook-dl`
+```
+
+No Node? Grab a standalone binary for your OS from the
+[Releases](../../releases) page (Linux / macOS / Windows).
+
+Downloads go to `~/Downloads/ebooks` by default. No port-forwarding needed —
+transfers dial out to the bot, so it works behind home routers.
 
 ## Keys
 
@@ -42,6 +59,8 @@ Downloads go to `~/Downloads/ebooks` by default.
 | `IRC_CHANNEL` | `#ebooks` |
 | `IRC_NICK` | `reader<random>` |
 | `DOWNLOAD_DIR` | `~/Downloads/ebooks` |
+| `FORMATS` | `epub` (comma-separated, e.g. `epub,mobi`) |
+| `BLOCK_PROVIDERS` | `Dumbledore` (hide these serving bots; set empty to disable) |
 
 ## Known limits
 

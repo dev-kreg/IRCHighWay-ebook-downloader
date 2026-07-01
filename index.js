@@ -6,12 +6,18 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { pathToFileURL } = require('url');
+// Correct file:// URL on every OS (Windows paths have backslashes + a drive
+// letter that a hand-built "file://" + path would mangle).
+const fileUrl = (p) => pathToFileURL(p).href;
 const IRC = require('irc-framework');
 const dcc = require('./dcc');
-const { parseResultsZip, isSupportedArchive, filterFormats, scoreResult, providerOf } = require('./parse');
+const { parseResultsZip, isSupportedArchive, filterFormats, scoreResult, providerOf, splitFields, sizeOf, versionOf, isRetail, takePendingBook } = require('./parse');
 const { createUI } = require('./ui');
 const providers = require('./providers');
 const providerStats = providers.load();
+const downloaded = require('./downloaded');
+const downloadedStore = downloaded.load();
 
 const cfg = {
   host: process.env.IRC_HOST || 'irc.irchighway.net',
@@ -23,6 +29,10 @@ const cfg = {
   downloadDir: process.env.DOWNLOAD_DIR || path.join(os.homedir(), 'Downloads', 'ebooks'),
   // Only show these formats in results. Comma-separated, e.g. FORMATS=epub,mobi
   formats: (process.env.FORMATS || 'epub').split(',').map((s) => s.trim()).filter(Boolean),
+  // Providers (serving bots) to hide from results — e.g. ones that reliably
+  // fail. Comma-separated, case-insensitive. Set BLOCK_PROVIDERS= to disable.
+  blockProviders: new Set((process.env.BLOCK_PROVIDERS ?? 'Dumbledore')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)),
   debug: process.env.DEBUG === '1',
   debugLog: process.env.DEBUG_LOG || path.join(__dirname, 'debug.log'),
 };
@@ -43,16 +53,15 @@ if (cfg.debug) {
 }
 
 ui.status(`{cyan-fg}Connecting to ${cfg.host}:${cfg.port} as ${cfg.nick}...{/}`);
-ui.status(`Downloads: file://${cfg.downloadDir}  {grey-fg}(Ctrl+Click to open){/}`);
+ui.status(`Downloads: ${fileUrl(cfg.downloadDir)}  {grey-fg}(Ctrl+Click to open){/}`);
 if (cfg.debug) ui.status(`{grey-fg}debug: logging to ${cfg.debugLog}{/}`);
 
 const client = new IRC.Client();
 let joined = false;
 let pendingSearch = false;
-// Requested result items, FIFO — matched to incoming book DCC offers so we can
-// drive that row's progress/result and record the provider's success/fail.
-// ponytail: assumes downloads resolve in request order; fine for interactive
-// use, revisit if parallel downloads get reordered.
+// Requested result items — matched to incoming book DCC offers by filename (see
+// takePendingBook) so we can drive that row's progress/result and record the
+// provider's success/fail, even if a later request's bot answers first.
 const pendingBooks = [];
 
 client.connect({
@@ -74,11 +83,17 @@ client.on('join', (e) => {
 });
 
 // Surface channel/bot notices (incl. the "wait 60s" and search-in-progress msgs).
-client.on('notice', (e) => ui.status('{yellow-fg}[notice]{/} ' + trunc(e.message)));
+// While a search is in flight, SearchBot's own step-by-step notices (accepted,
+// searching, "returned N matches") also surface under the big spinner.
+client.on('notice', (e) => {
+  const msg = clean(e.message);
+  ui.status('{yellow-fg}[notice]{/} ' + msg);
+  if (pendingSearch) ui.setSearchStep(msg);
+});
 client.on('message', (e) => {
   if (e.type === 'notice') return; // irc-framework double-emits notices as 'message'; the notice handler owns those
   if (e.target === cfg.channel) return; // ignore channel chatter
-  ui.status('{grey-fg}[' + e.nick + ']{/} ' + trunc(e.message)); // PMs from bots
+  ui.status('{grey-fg}[' + e.nick + ']{/} ' + clean(e.message)); // PMs from bots
 });
 
 client.on('ctcp request', (e) => {
@@ -96,9 +111,13 @@ client.on('ctcp request', (e) => {
     return;
   }
 
-  const bookItem = looksLikeResults ? null : pendingBooks.shift();
-  ui.status('{cyan-fg}Receiving{/} ' + name + ' (' + human(offer.size) + ')...');
-  if (bookItem) ui.waveRow(bookItem); // sweep animation until first bytes arrive
+  const bookItem = looksLikeResults ? null : takePendingBook(pendingBooks, name);
+  // Tag book-related log lines with the title explicitly — some failure
+  // messages (e.g. a bare socket error) don't otherwise say which book they're
+  // about, which is exactly what made past failures hard to follow.
+  const tag = bookItem ? '{grey-fg}[' + bookItem.title + ']{/} ' : '';
+  ui.status(tag + '{cyan-fg}Receiving{/} ' + name + ' (' + human(offer.size) + ')...');
+  if (bookItem) ui.setRowProgress(bookItem, 0);
   let lastTick = 0;
   dcc.receive(offer, cfg.downloadDir, (recv, total) => {
     if (!bookItem) return; // results zip: no per-row progress
@@ -112,34 +131,47 @@ client.on('ctcp request', (e) => {
       pendingSearch = false;
       const all = parseResultsZip(filepath);
       fs.rm(filepath, () => {}); // parsed into memory; drop the zip so it doesn't pollute the downloads/bookdrop dir
-      const items = filterFormats(all, cfg.formats);
+      const items = filterFormats(all, cfg.formats)
+        .filter((r) => !cfg.blockProviders.has(providerOf(r.cmd).toLowerCase()));
       if (!items.length) {
-        return ui.status('{red-fg}No ' + cfg.formats.join('/') + ' in ' + all.length + ' results.{/} Set FORMATS env to widen.');
+        ui.status('{red-fg}No ' + cfg.formats.join('/') + ' in ' + all.length + ' results.{/} Set FORMATS env to widen.');
+        return ui.showEmpty('No {bold}' + cfg.formats.join('/') + '{/bold} results\n' +
+          '{grey-fg}(' + all.length + ' total, set FORMATS env to widen){/}');
       }
       // Rank by apparent quality, best first. Annotate each row with the serving
       // bot's success/fail record (display only — does not affect the sort).
       for (const r of items) r.score = scoreResult(r);
       items.sort((a, b) => b.score - a.score);
-      const topScore = items[0].score;
+      // Structured fields for ui.js's column layout; r.label stays the raw bot
+      // line (sizeOf/scoreResult read it) and is not shown directly anymore.
       for (const r of items) {
         r.provider = providerOf(r.cmd);
+        const f = splitFields(r.cmd, r.provider);
+        r.author = f.author;
+        r.title = f.title;
+        r.extras = f.extras;
+        r.sizeText = sizeOf(r.label) ? human(sizeOf(r.label)) : '';
+        // Star: proofed to v3+ or sourced retail — a real quality signal either way.
+        r.top = versionOf(r.label) >= 3 || isRetail(r.label);
+        r.downloaded = downloaded.has(downloadedStore, r.provider, r.author, r.title);
         const t = providers.tag(providerStats, r.provider); // "✓3 ✗1"
-        const stats = t
+        r.statsText = t
           ? '  {grey-fg}[{/}' + t.replace(/✓\d+/, '{green-fg}$&{/}').replace(/✗\d+/, '{red-fg}$&{/}') + '{grey-fg}]{/}'
           : '';
-        // Subtle marker for the best-scoring result(s); only when there's a real signal.
-        const star = (r.score === topScore && topScore > 0) ? '{yellow-fg}★ {/}' : '';
-        r.label = star + r.label + stats;
       }
       ui.setResults(items);
       ui.status('{green-fg}' + items.length + '/' + all.length + ' results{/} (' + cfg.formats.join(',') + '). ↑↓ + Enter.');
     } else {
-      if (bookItem) { providers.record(providerStats, bookItem.provider, true); ui.setRowResult(bookItem, true); }
-      ui.status('{green-fg}Saved{/} file://' + filepath + '  {grey-fg}| folder:{/} file://' + cfg.downloadDir);
+      if (bookItem) {
+        providers.record(providerStats, bookItem.provider, true);
+        downloaded.record(downloadedStore, bookItem.provider, bookItem.author, bookItem.title);
+        ui.setRowResult(bookItem, true);
+      }
+      ui.status(tag + '{green-fg}Saved{/} ' + fileUrl(filepath) + '  {grey-fg}| folder:{/} ' + fileUrl(cfg.downloadDir));
     }
   }).catch((err) => {
     if (bookItem) { providers.record(providerStats, bookItem.provider, false); ui.setRowResult(bookItem, false); }
-    ui.status('{red-fg}Transfer failed:{/} ' + err.message);
+    ui.status(tag + '{red-fg}Transfer failed:{/} ' + err.message);
   });
 });
 
@@ -152,6 +184,7 @@ client.on('error', (e) => ui.status('{red-fg}IRC error:{/} ' + (e && e.message |
 
 function search(q) {
   if (!joined) return ui.status('{red-fg}Not in channel yet.{/}');
+  ui.clearResults();
   pendingSearch = true;
   ui.setSearching(true);
   ui.status('{cyan-fg}@search{/} ' + q);
@@ -165,13 +198,24 @@ const DEBOUNCE_MS = 3000;
 
 function download(r) {
   if (!joined) return ui.status('{red-fg}Not in channel yet.{/}');
-  if (recentReqs.has(r.cmd)) return ui.status('{yellow-fg}Ignored duplicate:{/} ' + r.cmd);
+  if (recentReqs.has(r.cmd)) return; // accidental double-fire; not worth a log line
   recentReqs.add(r.cmd);
   setTimeout(() => recentReqs.delete(r.cmd), DEBOUNCE_MS);
   pendingBooks.push(r);
+  ui.setRowQueued(r);
   ui.status('{cyan-fg}Requesting{/} ' + r.cmd);
   client.say(cfg.channel, r.cmd);
 }
 
 function trunc(s) { return (s || '').length > 200 ? s.slice(0, 200) + '…' : s; }
+// Strip mIRC/IRC formatting (color, bold, etc.) that bots pepper into notices,
+// and collapse the alignment padding, so the status line stays readable.
+function clean(s) {
+  return trunc((s || '')
+    .replace(/\x03\d{0,2}(,\d{1,2})?/g, '') // mIRC color: ^C[fg[,bg]]
+    .replace(/\x04[0-9a-fA-F]{6}/g, '')     // hex color: ^D RRGGBB
+    .replace(/[\x00-\x1f]/g, ' ')           // bold/italic/underline/reset + stray controls
+    .replace(/\s{2,}/g, '  ')               // collapse alignment padding
+    .trim());
+}
 function human(b) { if (!b) return '?'; const u = ['B', 'KB', 'MB', 'GB']; let i = 0; while (b >= 1024 && i < 3) { b /= 1024; i++; } return b.toFixed(1) + u[i]; }
