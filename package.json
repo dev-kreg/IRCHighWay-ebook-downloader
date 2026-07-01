@@ -1,0 +1,13 @@
+{
+  "name": "irc-ebook-downloader",
+  "version": "0.1.0",
+  "description": "TUI for downloading ebooks from IRC (#ebooks on irchighway)",
+  "type": "commonjs",
+  "bin": { "ebook-dl": "index.js" },
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "adm-zip": "^0.5.10",
+    "blessed": "^0.1.81",
+    "irc-framework": "^4.13.1"
+  }
+}
