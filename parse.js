@@ -83,10 +83,14 @@ function filenameOf(cmd) {
 // would otherwise credit the wrong row's ✓/✗ and provider stats.
 // ponytail: same-titled duplicates from different providers still resolve
 // FIFO among themselves — DCC offers carry no real per-request correlation ID.
-function takePendingBook(queue, filename) {
-  if (!queue.length) return undefined;
+const STALE_MS = 5 * 60 * 1000;
+function takePendingBook(queue, filename, now = Date.now()) {
   const idx = queue.findIndex((r) => filenameOf(r.cmd) === filename);
-  return queue.splice(idx >= 0 ? idx : 0, 1)[0];
+  if (idx >= 0) return queue.splice(idx, 1)[0];
+  // Unmatched offer → FIFO fallback, but never credit a request so old its bot
+  // has clearly bailed; evict those first or they absorb someone else's offer.
+  while (queue.length && now - (queue[0].queuedAt || now) > STALE_MS) queue.shift();
+  return queue.shift();
 }
 
 // File size in bytes from the "::INFO:: 1.2MB" trailer; 0 if absent.
@@ -160,5 +164,12 @@ if (require.main === module) {
   console.assert(takePendingBook(queue, 'unrecognized filename.epub') === qA, 'unmatched falls back to FIFO head');
   console.assert(queue.length === 1 && queue[0] === qC, 'fallback removed the head', queue);
   console.assert(takePendingBook([], 'anything.epub') === undefined, 'empty queue');
+  // Stale eviction: a dead request at the head must not absorb an unmatched
+  // offer via the FIFO fallback — but an exact filename match is honored at any age.
+  const now = Date.now();
+  const dead = { cmd: '!Bsk Old - Never Answered.epub', queuedAt: now - 6 * 60 * 1000 };
+  const fresh = { cmd: '!Oatmeal New - Book.epub', queuedAt: now };
+  console.assert(takePendingBook([dead, fresh], 'unrecognized.epub', now) === fresh, 'stale head evicted from fallback');
+  console.assert(takePendingBook([dead, fresh], 'Old - Never Answered.epub', now) === dead, 'exact match ignores staleness');
   console.log('parse.js self-check OK');
 }

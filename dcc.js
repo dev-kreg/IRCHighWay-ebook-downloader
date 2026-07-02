@@ -40,11 +40,14 @@ function receive(offer, destDir, onProgress) {
       if (onProgress) onProgress(received, offer.size);
       if (offer.size && received >= offer.size) sock.end();
     });
-    sock.on('timeout', () => { sock.destroy(); out.destroy(); reject(new Error('DCC timeout: ' + offer.filename)); });
-    sock.on('error', (e) => { out.destroy(); reject(e); });
+    // Failed transfers must not leave a truncated file at dest looking like a
+    // good download — drop it along with rejecting.
+    const fail = (err) => { out.destroy(); fs.unlink(dest, () => {}); reject(err); };
+    sock.on('timeout', () => { sock.destroy(); fail(new Error('DCC timeout: ' + offer.filename)); });
+    sock.on('error', fail);
     sock.on('close', () => {
       out.end(() => {
-        if (offer.size && received < offer.size) reject(new Error(`incomplete: ${received}/${offer.size} bytes`));
+        if (offer.size && received < offer.size) fail(new Error(`incomplete: ${received}/${offer.size} bytes`));
         else resolve(dest);
       });
     });

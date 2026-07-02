@@ -170,6 +170,7 @@ client.on('ctcp request', (e) => {
       ui.status(tag + '{green-fg}Saved{/} ' + fileUrl(filepath) + '  {grey-fg}| folder:{/} ' + fileUrl(cfg.downloadDir));
     }
   }).catch((err) => {
+    if (looksLikeResults) pendingSearch = false; // else the next stray .zip offer would be classified as results
     if (bookItem) { providers.record(providerStats, bookItem.provider, false); ui.setRowResult(bookItem, false); }
     ui.status(tag + '{red-fg}Transfer failed:{/} ' + err.message);
   });
@@ -201,6 +202,7 @@ function download(r) {
   if (recentReqs.has(r.cmd)) return; // accidental double-fire; not worth a log line
   recentReqs.add(r.cmd);
   setTimeout(() => recentReqs.delete(r.cmd), DEBOUNCE_MS);
+  r.queuedAt = Date.now(); // takePendingBook evicts entries whose bot never answered
   pendingBooks.push(r);
   ui.setRowQueued(r);
   ui.status('{cyan-fg}Requesting{/} ' + r.cmd);
